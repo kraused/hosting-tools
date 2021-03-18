@@ -1,11 +1,13 @@
+"""
+mail-alias: Manage e-mail aliases using the Plesk XML RPC API
+"""
 
 import os
 import argparse
-import http.client 
+import http.client
 import ssl
 import lxml
 import lxml.etree
-
 
 PROGRAM_DESCRIPTION = "Manager e-mail aliases via plesk"
 
@@ -15,20 +17,25 @@ class PleskApiClient:
     Client for the XML-RPC API of Plesk
     """
 
-    def __init__(self, host, port = 8443, ssl_unverified = False):
+    def __init__(self, host, port=8443, ssl_unverified=False):
         self.host = host
         self.port = port
         self.secret_key = None
         self.ssl_unverified = ssl_unverified
+        self.login = None
+        self.passwd = None
 
-    def set_credentials(self, login, password):
+    def set_credentials(self, login, passwd):
+        """Set the API user name and the password to use"""
         self.login = login
-        self.password = password
+        self.passwd = passwd
 
     def set_secret_key(self, secret_key):
+        """Specify a ssecret key to use for the API access"""
         self.secret_key = secret_key
 
     def request(self, request):
+        """Issue the specified XML RPC request. `request` must be a valid XML string"""
         headers = {}
         headers["Content-type"] = "text/xml"
         headers["HTTP_PRETTY_PRINT"] = "TRUE"
@@ -37,11 +44,13 @@ class PleskApiClient:
             headers["KEY"] = self.secret_key
         else:
             headers["HTTP_AUTH_LOGIN"] = self.login
-            headers["HTTP_AUTH_PASSWD"] = self.password
+            headers["HTTP_AUTH_PASSWD"] = self.passwd
 
-        if self.ssl_unverified == True:
-            print("Warning: Skipping certificate verification!")
-            conn = httplib.HTTPSConnection(self.host, self.port, context=ssl._create_unverified_context())
+        if self.ssl_unverified is True:
+            conn = http.client.HTTPSConnection(self.host, self.port,
+                                            context=ssl._create_unverified_context())
+            raise Exception("Certificate exception verification can only be "
+                            "skipped by removing this exception")
         else:
             conn = http.client.HTTPSConnection(self.host, self.port)
 
@@ -60,15 +69,25 @@ class PleskMailAliasManager:
         self._site = site
         self._site_id = self._get_site_id()
 
-    def _xml_packet(self, str):
-        return f"<packet>{str}</packet>"
+    @classmethod
+    def _xml_packet(cls, xml):
+        return f"<packet>{xml}</packet>"
 
-    def _verify_status_ok(self, path, response):
-        result = response.findall(f"{path}/status")
-        if 1 != len(result):
-            return False    # Unexpected output
+    @classmethod
+    def _xml_find_one(cls, el, path):
+        el = el.findall(path)
+        if 1 != len(el):
+            raise Exception("_xml_find_one() assumes that findall() returns exactly one result")
+        return el[0]
 
-        return ("ok" == result[0].text)
+    @classmethod
+    def _verify_status_ok(cls, path, response):
+        try:
+            result = cls._xml_find_one(response, f"{path}/status")
+        except Exception:
+            return False
+
+        return "ok" == result.text
 
     def _get_site_id(self):
         request = self._xml_packet(f"""\
@@ -88,26 +107,24 @@ class PleskMailAliasManager:
         response = lxml.etree.XML(resp)
 
         site_id = None
-        
+
         for result in response.findall("./site/get/result"):
             if not self._verify_status_ok(".", result):
                 raise Exception(f"XML RPC response was not okay: '{resp}'")
 
-            x = result.findall("./data/gen_info/name")
-            assert 1 == len(x)
-            assert self._site == x[0].text
-        
-            x = result.findall("./id")
-            assert 1 == len(x)
-            site_id = x[0].text
+            if self._site != self._xml_find_one(result, "./data/gen_info/name").text:
+                raise Exception("XML RPC response does not match specified site name")
+
+            site_id = int(self._xml_find_one(result, "./id").text)
 
         if site_id is None:
             raise Exception(f"XML RPC response was not okay: '{resp}'")
 
         return int(site_id)
 
-    def _xml_mail_packet(self, str):
-        return self._xml_packet(f"<mail>{str}</mail>")
+    @classmethod
+    def _xml_mail_packet(cls, xml):
+        return cls._xml_packet(f"<mail>{xml}</mail>")
 
     def _xml_mail_filter_site_account_alias(self, account, alias):
         return f"""\
@@ -121,6 +138,9 @@ class PleskMailAliasManager:
 """
 
     def add_mail_alias(self, account, alias):
+        """
+        Add the specified mail alias for the account.
+        """
         request = self._xml_mail_packet(f"""\
 <update>
     <add>
@@ -136,6 +156,9 @@ class PleskMailAliasManager:
             raise Exception(f"XML RPC response was not okay: '{resp}'")
 
     def del_mail_alias(self, account, alias):
+        """
+        Delete the specified mail alias for the account.
+        """
         request = self._xml_mail_packet(f"""\
 <update>
     <remove>
@@ -151,6 +174,9 @@ class PleskMailAliasManager:
             raise Exception(f"XML RPC response was not okay: '{resp}'")
 
     def query_aliases(self, account):
+        """
+        List all mail aliase for the account.
+        """
         request = self._xml_mail_packet(f"""\
 <get_info>
     <filter>
@@ -175,16 +201,17 @@ class PleskMailAliasManager:
         return aliases
 
 def parse_cmdline_args():
+    """Parse the command line arguments"""
     p = argparse.ArgumentParser(description=PROGRAM_DESCRIPTION)
 
     p.add_argument("-U", dest="api_user", default="admin",
                     help="User for API access (default: 'admin')")
-    p.add_argument("-H", dest="api_host", required=True, 
+    p.add_argument("-H", dest="api_host", required=True,
                     help="API endpoint host")
-    p.add_argument("-P", dest="passwd_env_var", required=True, 
-                    help="Environment variable that stores the API password")
+    p.add_argument("-P", dest="passwd_env_var", required=True,
+                    help="Environment variable that stores the API passwd")
 
-    p.add_argument("-M", dest="account", required=True, 
+    p.add_argument("-M", dest="account", required=True,
                     help="Mail account in the form [account]@[domain]")
 
     p.add_argument("-L", dest="list", action="store_true", default=False,
@@ -196,7 +223,9 @@ def parse_cmdline_args():
 
     return p, p.parse_args()
 
-if "__main__" == __name__:
+def main():
+    """Main program flow"""
+
     p, args = parse_cmdline_args()
 
     if not args.list and args.add is None and args.remove is None:
@@ -207,12 +236,12 @@ if "__main__" == __name__:
         p.error("-M argument must be passed in the form [account]@[domain]")
     account, site = tuple(p)
 
-    password = os.getenv(args.passwd_env_var)
-    if not password:
+    passwd = os.getenv(args.passwd_env_var)
+    if not passwd:
         raise Exception(f"Failed to read value of environment variable '{args.passwd_env_var}")
 
     client = PleskApiClient(args.api_host)
-    client.set_credentials(args.api_user, password)
+    client.set_credentials(args.api_user, passwd)
     mgr = PleskMailAliasManager(client, site)
 
     if args.list:
@@ -224,3 +253,6 @@ if "__main__" == __name__:
         mgr.add_mail_alias(account, args.add)
     if args.remove:
         mgr.del_mail_alias(account, args.remove)
+
+if "__main__" == __name__:
+    main()
